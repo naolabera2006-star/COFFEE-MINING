@@ -1,7 +1,7 @@
 import React from 'react';
 import { useApp } from '../../context/AppContext';
 import { NavigationTab } from '../../types';
-import { Home, Layers, Gift, FileSpreadsheet, Share2, User } from 'lucide-react';
+import { Home, Layers, Building2, Gift, FileSpreadsheet, Share2, User } from 'lucide-react';
 
 export const BottomNav: React.FC = () => {
   const { currentTab, setCurrentTab, activeOrders, user, t } = useApp();
@@ -9,6 +9,7 @@ export const BottomNav: React.FC = () => {
   const allTabs: { id: NavigationTab; label: string; icon: React.ComponentType<{ size?: number; className?: string }>; badgeCount?: number; adminOnly?: boolean }[] = [
     { id: 'home', label: t('tabHome', 'Home'), icon: Home },
     { id: 'plans', label: t('tabPlans', 'Plans'), icon: Layers, badgeCount: activeOrders.length > 0 ? activeOrders.length : undefined },
+    { id: 'properties', label: t('tabProperties', 'Estates'), icon: Building2 },
     { id: 'bonus', label: t('tabBonus', 'Bonus'), icon: Gift },
     { id: 'report', label: t('tabReport', 'Report'), icon: FileSpreadsheet, adminOnly: true },
     { id: 'share', label: t('tabShare', 'Share'), icon: Share2 },
@@ -22,7 +23,7 @@ export const BottomNav: React.FC = () => {
       id="bottom-navigation-bar"
       className="sticky bottom-0 left-0 right-0 z-30 bg-[#0e2a1e]/95 border-t border-[#1b4e36] shadow-[0_-8px_25px_rgba(0,0,0,0.85)] px-1.5 py-1.5 backdrop-blur-xl"
     >
-      <div className={`max-w-md mx-auto grid ${visibleTabs.length === 6 ? 'grid-cols-6' : 'grid-cols-5'} items-center justify-items-center`}>
+      <div className={`max-w-md mx-auto grid ${visibleTabs.length === 7 ? 'grid-cols-7' : visibleTabs.length === 6 ? 'grid-cols-6' : 'grid-cols-5'} items-center justify-items-center`}>
         {visibleTabs.map((tab) => {
           const isActive = currentTab === tab.id;
           const IconComponent = tab.icon;

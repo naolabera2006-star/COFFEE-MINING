@@ -6,7 +6,6 @@ import {
   Eye, 
   EyeOff, 
   Sparkles, 
-  Smartphone, 
   ArrowRight, 
   CheckCircle2, 
   RefreshCw, 
@@ -14,32 +13,34 @@ import {
   Send, 
   X, 
   ArrowLeft,
-  Link2,
-  Share2,
-  Copy,
-  Check,
   ShieldCheck,
-  Gift
+  Gift,
+  User,
+  AlertCircle,
+  Database
 } from 'lucide-react';
+import { SUPABASE_PROJECT_ID } from '../../lib/supabase';
 
 interface LoginPageProps {
   onSuccess?: () => void;
 }
 
 export const LoginPage: React.FC<LoginPageProps> = ({ onSuccess }) => {
-  const { loginWithCredentials, registerUser, showToast } = useApp();
+  const { loginWithCredentials, registerUser, resetPasswordForEmail, showToast } = useApp();
   
   const [mode, setMode] = useState<'login' | 'register'>('login');
   
-  // Form state
-  const [emailOrPhone, setEmailOrPhone] = useState('');
+  // Form fields
+  const [fullName, setFullName] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [inviteCode, setInviteCode] = useState('CMARJT5');
   const [showPassword, setShowPassword] = useState(false);
   const [rememberMe, setRememberMe] = useState(true);
   const [loading, setLoading] = useState(false);
-  const [detectedFromLink, setDetectedFromLink] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [signupSuccessNotice, setSignupSuccessNotice] = useState<string | null>(null);
   
   // Auto-detect invite code from Share Link in URL query params on load
   useEffect(() => {
@@ -54,162 +55,267 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onSuccess }) => {
       if (codeFromUrl && codeFromUrl.trim()) {
         const cleanCode = codeFromUrl.trim().toUpperCase();
         setInviteCode(cleanCode);
-        setDetectedFromLink(true);
-        setMode('register'); // Direct to register tab for immediate onboarding
-        showToast(`Invite code ${cleanCode} auto-applied from share link!`, 'info');
+        setMode('register');
+        showToast(`Invite code ${cleanCode} auto-applied from referral link!`, 'info');
       }
     } catch {
-      // Graceful fallback for non-standard environments
+      // Ignore URL parsing errors
     }
   }, [showToast]);
-  
-  // Google Account Chooser modal
+
   // Dedicated Forgot Password Modal State
   const [showForgotPasswordModal, setShowForgotPasswordModal] = useState(false);
-  const [forgotStep, setForgotStep] = useState<1 | 2 | 3>(1); // 1: Enter Email, 2: Enter OTP, 3: Set New Password
   const [forgotEmail, setForgotEmail] = useState('');
-  const [forgotOtp, setForgotOtp] = useState('');
-  const [newPassword, setNewPassword] = useState('');
-  const [confirmNewPassword, setConfirmNewPassword] = useState('');
-  const [showNewPassword, setShowNewPassword] = useState(false);
   const [forgotLoading, setForgotLoading] = useState(false);
-  const [resendTimer, setResendTimer] = useState(0);
+  const [forgotSubmitted, setForgotSubmitted] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setErrorMessage(null);
+    setSignupSuccessNotice(null);
     setLoading(true);
 
-    try {
-      const identifier = emailOrPhone.trim();
-      const roleToUse: 'user' | 'admin' = identifier.toLowerCase().includes('admin') ? 'admin' : 'user';
+    const cleanEmail = email.trim();
+    if (!cleanEmail) {
+      setErrorMessage('Please enter your email address.');
+      setLoading(false);
+      return;
+    }
 
+    try {
       if (mode === 'login') {
-        const res = await loginWithCredentials(identifier, password, roleToUse);
-        if (res.success && onSuccess) onSuccess();
+        const roleToUse: 'user' | 'admin' = cleanEmail.toLowerCase().includes('admin') ? 'admin' : 'user';
+        const res = await loginWithCredentials(cleanEmail, password, roleToUse);
+        if (res.success) {
+          if (onSuccess) onSuccess();
+        } else {
+          setErrorMessage(res.message);
+          showToast(res.message, 'error');
+        }
       } else {
+        // Registration mode
         if (password !== confirmPassword) {
+          setErrorMessage('Passwords do not match. Please re-enter your password.');
           showToast('Passwords do not match!', 'error');
+          setLoading(false);
           return;
         }
-        const res = await registerUser(identifier, password, inviteCode);
-        if (res.success && onSuccess) onSuccess();
+
+        if (password.length < 6) {
+          setErrorMessage('Password must be at least 6 characters (Supabase security requirement).');
+          showToast('Password must be at least 6 characters', 'error');
+          setLoading(false);
+          return;
+        }
+
+        const res = await registerUser(cleanEmail, password, inviteCode, fullName);
+        if (res.success) {
+          if (res.requiresEmailConfirmation) {
+            setSignupSuccessNotice(
+              `Account created successfully! Supabase has sent a verification email to ${cleanEmail}. Please confirm your email inbox and then sign in.`
+            );
+            setMode('login');
+          } else {
+            if (onSuccess) onSuccess();
+          }
+        } else {
+          setErrorMessage(res.message);
+          showToast(res.message, 'error');
+        }
       }
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Authentication error occurred.');
     } finally {
       setLoading(false);
     }
   };
 
-  // Forgot Password Actions
-  const handleSendOtp = (e: React.FormEvent) => {
+  // Quick Demo account filler
+  const handleQuickDemo = async (type: 'investor' | 'admin') => {
+    setErrorMessage(null);
+    setLoading(true);
+    if (type === 'admin') {
+      setEmail('admin@coffee-invest.app');
+      setPassword('admin123');
+      const res = await loginWithCredentials('admin@coffee-invest.app', 'admin123', 'admin');
+      if (res.success && onSuccess) onSuccess();
+    } else {
+      setEmail('demo@coffee-invest.app');
+      setPassword('demo123');
+      const res = await loginWithCredentials('demo@coffee-invest.app', 'demo123', 'user');
+      if (res.success && onSuccess) onSuccess();
+    }
+    setLoading(false);
+  };
+
+  // Forgot Password Action via Supabase
+  const handleSendPasswordReset = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!forgotEmail || !forgotEmail.includes('@')) {
       showToast('Please enter a valid registered email address', 'error');
       return;
     }
     setForgotLoading(true);
-    setTimeout(() => {
+    try {
+      const res = await resetPasswordForEmail(forgotEmail);
+      if (res.success) {
+        setForgotSubmitted(true);
+      } else {
+        showToast(res.message, 'error');
+      }
+    } finally {
       setForgotLoading(false);
-      setForgotStep(2);
-      setForgotOtp('582914'); // Realistic demo OTP pre-filled for convenience
-      setResendTimer(60);
-      showToast(`Verification code sent to ${forgotEmail}`, 'success');
-      
-      const interval = setInterval(() => {
-        setResendTimer((prev) => {
-          if (prev <= 1) {
-            clearInterval(interval);
-            return 0;
-          }
-          return prev - 1;
-        });
-      }, 1000);
-    }, 600);
-  };
-
-  const handleVerifyOtp = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (forgotOtp.length < 4) {
-      showToast('Please enter the 6-digit verification code', 'error');
-      return;
     }
-    setForgotStep(3);
-    showToast('Code verified successfully! Now create your new password.', 'success');
-  };
-
-  const handleResetPassword = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (newPassword.length < 4) {
-      showToast('Password must be at least 4 characters long', 'error');
-      return;
-    }
-    if (newPassword !== confirmNewPassword) {
-      showToast('Passwords do not match', 'error');
-      return;
-    }
-    setForgotLoading(true);
-    setTimeout(async () => {
-      setForgotLoading(false);
-      setShowForgotPasswordModal(false);
-      setPassword(newPassword);
-      setEmailOrPhone(forgotEmail);
-      setForgotStep(1);
-      showToast('Password updated! Signing in automatically...', 'success');
-      await loginWithCredentials(forgotEmail, newPassword);
-      if (onSuccess) onSuccess();
-    }, 700);
   };
 
   return (
     <div className="flex-1 flex flex-col justify-between p-4 sm:p-6 text-white overflow-y-auto max-w-md mx-auto w-full">
-      {/* Top Header & Branding */}
-      <div className="space-y-4 pt-3">
-        <div className="flex flex-col items-center justify-center text-center py-2 space-y-2">
-          <div className="w-14 h-14 rounded-3xl bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-3xl shadow-xl shadow-emerald-500/15">
+      <div className="space-y-4 pt-2">
+        {/* Top Header & Branding */}
+        <div className="flex flex-col items-center justify-center text-center space-y-2">
+          <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-emerald-500/25 to-emerald-700/20 border border-emerald-500/30 flex items-center justify-center text-3xl shadow-xl shadow-emerald-500/10">
             ☕
           </div>
           <div>
             <h1 className="text-2xl sm:text-3xl font-black text-white tracking-tight font-['Outfit']">
               COFFEE MINING
             </h1>
+            <p className="text-xs text-zinc-400 font-medium mt-0.5">
+              Ethiopian Coffee Investment & Real-Time Cloud Mining
+            </p>
+          </div>
+
+          {/* Supabase Status Tag */}
+          <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-950/70 border border-emerald-500/30 text-[11px] font-semibold text-emerald-300 shadow-xs">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            <Database size={12} className="text-emerald-400" />
+            <span>Supabase Email Auth Active</span>
+            <span className="text-zinc-500 font-mono text-[10px]">({SUPABASE_PROJECT_ID.slice(0, 8)}...)</span>
           </div>
         </div>
 
-        {/* Welcome Banner Card (only in register mode) */}
-        {mode === 'register' && (
-          <div className="bg-gradient-to-br from-zinc-900 via-zinc-900 to-zinc-950 p-4 rounded-3xl border border-zinc-800 shadow-xl relative overflow-hidden">
-            <div className="absolute top-0 right-0 w-32 h-32 bg-emerald-500/10 rounded-full blur-2xl pointer-events-none" />
-            
-            <div className="relative z-10 flex items-center justify-between">
-              <div>
-                <h2 className="text-xl font-extrabold text-white font-['Outfit'] mt-0.5">
-                  Create Mining Account
-                </h2>
-                <p className="text-xs text-zinc-400 mt-1">
-                  Get ETB 100 ETB Free Coffee Starter Credit on registration!
-                </p>
-              </div>
+        {/* Tab Switcher: Sign In vs Sign Up */}
+        <div className="grid grid-cols-2 p-1 bg-zinc-900/90 rounded-2xl border border-zinc-800 shadow-inner">
+          <button
+            id="tab-auth-login"
+            type="button"
+            onClick={() => {
+              setMode('login');
+              setErrorMessage(null);
+            }}
+            className={`py-2.5 rounded-xl font-black text-xs transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+              mode === 'login'
+                ? 'bg-emerald-500 text-black shadow-md shadow-emerald-500/20 font-bold'
+                : 'text-zinc-400 hover:text-white'
+            }`}
+          >
+            <span>Sign In</span>
+          </button>
+
+          <button
+            id="tab-auth-register"
+            type="button"
+            onClick={() => {
+              setMode('register');
+              setErrorMessage(null);
+            }}
+            className={`py-2.5 rounded-xl font-black text-xs transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+              mode === 'register'
+                ? 'bg-emerald-500 text-black shadow-md shadow-emerald-500/20 font-bold'
+                : 'text-zinc-400 hover:text-white'
+            }`}
+          >
+            <span>Create Account</span>
+            <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-bold ${
+              mode === 'register' ? 'bg-black/20 text-black' : 'bg-emerald-500/20 text-emerald-300'
+            }`}>
+              +100 ETB
+            </span>
+          </button>
+        </div>
+
+        {/* Success Notice after registration when email confirmation is active */}
+        {signupSuccessNotice && (
+          <div className="p-3.5 rounded-2xl bg-emerald-950/60 border border-emerald-500/40 text-emerald-200 text-xs flex items-start gap-2.5 animate-in fade-in">
+            <CheckCircle2 size={16} className="text-emerald-400 shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <strong className="block font-bold text-white">Verification Email Dispatched</strong>
+              <p className="leading-relaxed text-zinc-300">{signupSuccessNotice}</p>
             </div>
           </div>
         )}
 
-        {/* Standard Email or Phone Form */}
-        <form onSubmit={handleSubmit} className="space-y-3.5 bg-zinc-900/50 p-4 rounded-3xl border border-zinc-800/80 shadow-md">
-          {/* Email or Phone Field */}
+        {/* Error Alert Display */}
+        {errorMessage && (
+          <div className="p-3 rounded-2xl bg-rose-950/60 border border-rose-500/40 text-rose-200 text-xs flex items-center gap-2 animate-in fade-in">
+            <AlertCircle size={16} className="text-rose-400 shrink-0" />
+            <span className="flex-1">{errorMessage}</span>
+            <button 
+              type="button" 
+              onClick={() => setErrorMessage(null)} 
+              className="text-rose-400 hover:text-white cursor-pointer"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        )}
+
+        {/* Registration Welcome Incentive Banner */}
+        {mode === 'register' && (
+          <div className="bg-gradient-to-r from-emerald-950/50 via-zinc-900 to-zinc-900 p-3.5 rounded-2xl border border-emerald-500/25 shadow-md flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-xl bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
+                <Gift size={16} />
+              </div>
+              <div>
+                <h2 className="text-xs font-bold text-white">Welcome Gift Pack</h2>
+                <p className="text-[11px] text-zinc-400">Claim ETB 100.00 Free Coffee Starter Credit</p>
+              </div>
+            </div>
+            <span className="text-xs font-black text-emerald-400 font-mono">+100.00 ETB</span>
+          </div>
+        )}
+
+        {/* Main Authentication Form */}
+        <form onSubmit={handleSubmit} className="space-y-3.5 bg-zinc-900/60 p-4 rounded-3xl border border-zinc-800/90 shadow-md">
+          {/* Full Name field (Sign Up only) */}
+          {mode === 'register' && (
+            <div className="space-y-1.5">
+              <label htmlFor="register-name-input" className="text-xs font-bold text-zinc-300 block">
+                Full Name:
+              </label>
+              <div className="relative">
+                <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-zinc-500">
+                  <User size={16} />
+                </div>
+                <input
+                  id="register-name-input"
+                  type="text"
+                  value={fullName}
+                  onChange={(e) => setFullName(e.target.value)}
+                  placeholder="e.g. Abebe Kebede"
+                  className="w-full pl-10 pr-3.5 py-3 bg-zinc-950 rounded-2xl border border-zinc-800 text-xs sm:text-sm font-semibold text-white placeholder:text-zinc-600 focus:outline-hidden focus:border-emerald-500 transition-colors"
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Email Address Field */}
           <div className="space-y-1.5">
-            <label className="text-xs font-bold text-zinc-300 block">
-              Email or Phone:
+            <label htmlFor="auth-email-input" className="text-xs font-bold text-zinc-300 block">
+              Email Address:
             </label>
             <div className="relative">
               <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-zinc-500">
                 <Mail size={16} />
               </div>
               <input
-                id="login-email-phone-input"
-                type="text"
+                id="auth-email-input"
+                type="email"
                 required
-                value={emailOrPhone}
-                onChange={(e) => setEmailOrPhone(e.target.value)}
-                placeholder="Enter your email or phone number"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="name@example.com"
                 className="w-full pl-10 pr-3.5 py-3 bg-zinc-950 rounded-2xl border border-zinc-800 text-xs sm:text-sm font-semibold text-white placeholder:text-zinc-600 focus:outline-hidden focus:border-emerald-500 transition-colors"
               />
             </div>
@@ -217,19 +323,26 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onSuccess }) => {
 
           {/* Password Field */}
           <div className="space-y-1.5">
-            <label className="text-xs font-bold text-zinc-300 block">Password:</label>
+            <div className="flex items-center justify-between">
+              <label htmlFor="auth-password-input" className="text-xs font-bold text-zinc-300 block">
+                Password:
+              </label>
+              {mode === 'register' && (
+                <span className="text-[10px] text-zinc-400">Min. 6 characters</span>
+              )}
+            </div>
 
             <div className="relative">
               <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-zinc-500">
                 <Lock size={16} />
               </div>
               <input
-                id="login-password-input"
+                id="auth-password-input"
                 type={showPassword ? 'text' : 'password'}
                 required
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder="Enter your account password"
+                placeholder={mode === 'login' ? 'Enter your password' : 'Create strong password'}
                 className="w-full pl-10 pr-10 py-3 bg-zinc-950 rounded-2xl border border-zinc-800 text-xs sm:text-sm font-semibold text-white placeholder:text-zinc-600 focus:outline-hidden focus:border-emerald-500 transition-colors"
               />
               <button
@@ -246,7 +359,9 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onSuccess }) => {
           {/* Confirm Password Field (when in register mode) */}
           {mode === 'register' && (
             <div className="space-y-1.5">
-              <label className="text-xs font-bold text-zinc-300 block">Confirm Password:</label>
+              <label htmlFor="register-confirm-password-input" className="text-xs font-bold text-zinc-300 block">
+                Confirm Password:
+              </label>
               <div className="relative">
                 <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-zinc-500">
                   <Lock size={16} />
@@ -257,7 +372,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onSuccess }) => {
                   required
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
-                  placeholder="Re-enter password"
+                  placeholder="Re-enter your password"
                   className="w-full pl-10 pr-3.5 py-3 bg-zinc-950 rounded-2xl border border-zinc-800 text-xs sm:text-sm font-semibold text-white placeholder:text-zinc-600 focus:outline-hidden focus:border-emerald-500 transition-colors"
                 />
               </div>
@@ -269,7 +384,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onSuccess }) => {
             <div className="space-y-1.5">
               <div className="flex items-center justify-between">
                 <label htmlFor="register-invite-code-input" className="text-xs font-bold text-zinc-300 block">
-                  Invite Code:
+                  Invitation Code:
                 </label>
                 <span className="text-[11px] text-emerald-400 font-semibold flex items-center gap-1">
                   <Sparkles size={12} />
@@ -285,14 +400,14 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onSuccess }) => {
                   type="text"
                   value={inviteCode}
                   onChange={(e) => setInviteCode(e.target.value.toUpperCase())}
-                  placeholder="Enter invite code (e.g. CMARJT5)"
+                  placeholder="e.g. CMARJT5"
                   className="w-full pl-10 pr-3.5 py-3 bg-zinc-950 rounded-2xl border border-zinc-800 text-xs sm:text-sm font-bold text-white placeholder:text-zinc-600 focus:outline-hidden focus:border-emerald-500 transition-colors uppercase tracking-wider font-mono"
                 />
               </div>
             </div>
           )}
 
-          {/* Remember me checkbox */}
+          {/* Remember credentials checkbox */}
           <div className="flex items-center justify-between pt-0.5">
             <div className="flex items-center gap-2">
               <input
@@ -318,30 +433,30 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onSuccess }) => {
             {loading ? (
               <>
                 <RefreshCw size={16} className="animate-spin" />
-                <span>Authenticating...</span>
+                <span>Connecting to Supabase...</span>
               </>
             ) : mode === 'login' ? (
               <>
-                <span>Login</span>
+                <span>Sign In with Email</span>
                 <ArrowRight size={16} />
               </>
             ) : (
               <>
                 <Sparkles size={16} />
-                <span>Register & Claim ETB 100 Bonus</span>
+                <span>Create Account & Claim ETB 100</span>
               </>
             )}
           </button>
 
-          {/* Forgot Password Link - Bottom of Login Button */}
+          {/* Forgot Password Link (Login mode only) */}
           {mode === 'login' && (
             <div className="text-center pt-1">
               <button
                 id="btn-forgot-password"
                 type="button"
                 onClick={() => {
-                  setForgotEmail(emailOrPhone);
-                  setForgotStep(1);
+                  setForgotEmail(email);
+                  setForgotSubmitted(false);
                   setShowForgotPasswordModal(true);
                 }}
                 className="text-xs font-semibold text-zinc-400 hover:text-emerald-400 flex items-center justify-center gap-1.5 mx-auto cursor-pointer transition-colors"
@@ -352,7 +467,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onSuccess }) => {
             </div>
           )}
 
-          {/* Don't have an account / Register Account at end of Login */}
+          {/* Bottom Switch between login and register */}
           <div className="pt-2 text-center text-xs flex items-center justify-center gap-1.5 border-t border-zinc-800/60 mt-1">
             <span className="text-zinc-400">
               {mode === 'login' ? "Don't have an account?" : 'Already registered?'}
@@ -360,16 +475,52 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onSuccess }) => {
             <button
               id="btn-switch-auth-mode"
               type="button"
-              onClick={() => setMode(mode === 'login' ? 'register' : 'login')}
+              onClick={() => {
+                setMode(mode === 'login' ? 'register' : 'login');
+                setErrorMessage(null);
+              }}
               className="text-emerald-400 font-bold hover:underline cursor-pointer transition-colors"
             >
-              {mode === 'login' ? 'Register Account' : 'Login'}
+              {mode === 'login' ? 'Sign Up for Free' : 'Sign In Here'}
             </button>
           </div>
         </form>
+
+        {/* Quick Testing Demo Accounts */}
+        <div className="p-3 bg-zinc-900/40 rounded-2xl border border-zinc-800/70 space-y-2">
+          <div className="flex items-center justify-between text-[11px] text-zinc-400 font-medium">
+            <span className="flex items-center gap-1">
+              <ShieldCheck size={12} className="text-emerald-400" />
+              <span>Instant Test Accounts (1-Click)</span>
+            </span>
+            <span className="text-[10px] text-zinc-500">Preview & QA</span>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              id="btn-quick-demo-user"
+              type="button"
+              disabled={loading}
+              onClick={() => handleQuickDemo('investor')}
+              className="py-2 px-2.5 rounded-xl bg-zinc-950 hover:bg-zinc-800 border border-zinc-800 text-[11px] font-bold text-zinc-300 hover:text-emerald-300 transition-colors cursor-pointer text-center truncate"
+            >
+              Demo Investor
+            </button>
+
+            <button
+              id="btn-quick-demo-admin"
+              type="button"
+              disabled={loading}
+              onClick={() => handleQuickDemo('admin')}
+              className="py-2 px-2.5 rounded-xl bg-zinc-950 hover:bg-zinc-800 border border-zinc-800 text-[11px] font-bold text-amber-300 hover:text-amber-200 transition-colors cursor-pointer text-center truncate"
+            >
+              Platform Admin
+            </button>
+          </div>
+        </div>
       </div>
 
-      {/* 2. DEDICATED FORGOT PASSWORD MODAL */}
+      {/* DEDICATED FORGOT PASSWORD MODAL (SUPABASE INTEGRATED) */}
       {showForgotPasswordModal && (
         <div 
           id="modal-forgot-password"
@@ -387,10 +538,10 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onSuccess }) => {
                 </div>
                 <div>
                   <h3 className="text-sm font-extrabold text-white font-['Outfit']">
-                    Reset Account Password
+                    Reset Password
                   </h3>
                   <p className="text-[10px] text-zinc-400">
-                    Step {forgotStep} of 3 • Secure Email Recovery
+                    Secure Supabase Email Recovery
                   </p>
                 </div>
               </div>
@@ -405,15 +556,35 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onSuccess }) => {
               </button>
             </div>
 
-            {/* Step 1: Request OTP by Email */}
-            {forgotStep === 1 && (
-              <form onSubmit={handleSendOtp} className="space-y-3">
+            {forgotSubmitted ? (
+              <div className="space-y-3 text-center py-2">
+                <div className="w-12 h-12 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-400 mx-auto flex items-center justify-center">
+                  <CheckCircle2 size={24} />
+                </div>
+                <h4 className="font-bold text-sm text-white">Reset Link Dispatched</h4>
                 <p className="text-xs text-zinc-300 leading-relaxed">
-                  Enter your registered email address. We will send a 6-digit verification code to reset your password.
+                  Supabase has sent a password reset email to:
+                  <strong className="block text-emerald-400 font-mono mt-1">{forgotEmail}</strong>
+                </p>
+                <p className="text-[11px] text-zinc-400">
+                  Please open your email client and follow the recovery link to set your new password.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setShowForgotPasswordModal(false)}
+                  className="w-full py-2.5 rounded-xl bg-emerald-500 text-black font-bold text-xs hover:bg-emerald-400 transition-colors cursor-pointer"
+                >
+                  Return to Sign In
+                </button>
+              </div>
+            ) : (
+              <form onSubmit={handleSendPasswordReset} className="space-y-3">
+                <p className="text-xs text-zinc-300 leading-relaxed">
+                  Enter your registered Supabase email address. We will send a secure password reset link to your inbox.
                 </p>
 
                 <div className="space-y-1">
-                  <label className="text-[11px] font-bold text-zinc-300 block">Registered Email Address:</label>
+                  <label htmlFor="forgot-email-input" className="text-[11px] font-bold text-zinc-300 block">Registered Email Address:</label>
                   <div className="relative">
                     <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-zinc-500">
                       <Mail size={15} />
@@ -441,123 +612,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onSuccess }) => {
                   ) : (
                     <>
                       <Send size={13} />
-                      <span>Send 6-Digit Code</span>
-                    </>
-                  )}
-                </button>
-              </form>
-            )}
-
-            {/* Step 2: Enter Verification Code */}
-            {forgotStep === 2 && (
-              <form onSubmit={handleVerifyOtp} className="space-y-3">
-                <div className="bg-zinc-950 p-2.5 rounded-xl border border-zinc-800 text-center space-y-1">
-                  <p className="text-[11px] text-zinc-400">Verification code sent to:</p>
-                  <strong className="text-xs text-emerald-400 font-mono block truncate">{forgotEmail}</strong>
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-[11px] font-bold text-zinc-300 block">Enter 6-Digit OTP Code:</label>
-                  <input
-                    id="forgot-otp-input"
-                    type="text"
-                    required
-                    maxLength={6}
-                    value={forgotOtp}
-                    onChange={(e) => setForgotOtp(e.target.value.replace(/\D/g, ''))}
-                    placeholder="582914"
-                    className="w-full px-3 py-2.5 bg-zinc-950 rounded-xl border border-zinc-800 text-center text-base font-mono font-black text-emerald-400 tracking-widest focus:outline-hidden focus:border-emerald-500"
-                  />
-                </div>
-
-                <div className="flex items-center justify-between text-[11px]">
-                  <button
-                    type="button"
-                    onClick={() => setForgotStep(1)}
-                    className="text-zinc-400 hover:text-white flex items-center gap-1 cursor-pointer"
-                  >
-                    <ArrowLeft size={12} />
-                    <span>Change Email</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    disabled={resendTimer > 0}
-                    onClick={() => {
-                      setResendTimer(60);
-                      showToast(`Code resent to ${forgotEmail}`, 'info');
-                    }}
-                    className={`font-bold ${resendTimer > 0 ? 'text-zinc-600 cursor-not-allowed' : 'text-emerald-400 hover:underline cursor-pointer'}`}
-                  >
-                    {resendTimer > 0 ? `Resend in ${resendTimer}s` : 'Resend Code'}
-                  </button>
-                </div>
-
-                <button
-                  id="btn-verify-forgot-otp"
-                  type="submit"
-                  className="w-full py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 active:scale-95 text-black font-black text-xs shadow-md shadow-emerald-500/20 transition-all cursor-pointer flex items-center justify-center gap-1.5"
-                >
-                  <CheckCircle2 size={14} />
-                  <span>Verify Code</span>
-                </button>
-              </form>
-            )}
-
-            {/* Step 3: Set New Password */}
-            {forgotStep === 3 && (
-              <form onSubmit={handleResetPassword} className="space-y-3">
-                <p className="text-xs text-zinc-300">
-                  Create a new secure password for your Coffee Mining account.
-                </p>
-
-                <div className="space-y-1">
-                  <label className="text-[11px] font-bold text-zinc-300 block">New Password:</label>
-                  <div className="relative">
-                    <input
-                      id="forgot-new-password-input"
-                      type={showNewPassword ? 'text' : 'password'}
-                      required
-                      value={newPassword}
-                      onChange={(e) => setNewPassword(e.target.value)}
-                      placeholder="Enter new password"
-                      className="w-full px-3 py-2.5 bg-zinc-950 rounded-xl border border-zinc-800 text-xs font-semibold text-white focus:outline-hidden focus:border-emerald-500"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowNewPassword(!showNewPassword)}
-                      className="absolute inset-y-0 right-0 pr-3 flex items-center text-zinc-500 hover:text-zinc-300 cursor-pointer"
-                    >
-                      {showNewPassword ? <EyeOff size={14} /> : <Eye size={14} />}
-                    </button>
-                  </div>
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-[11px] font-bold text-zinc-300 block">Confirm New Password:</label>
-                  <input
-                    id="forgot-confirm-new-password-input"
-                    type={showNewPassword ? 'text' : 'password'}
-                    required
-                    value={confirmNewPassword}
-                    onChange={(e) => setConfirmNewPassword(e.target.value)}
-                    placeholder="Confirm new password"
-                    className="w-full px-3 py-2.5 bg-zinc-950 rounded-xl border border-zinc-800 text-xs font-semibold text-white focus:outline-hidden focus:border-emerald-500"
-                  />
-                </div>
-
-                <button
-                  id="btn-save-new-password"
-                  type="submit"
-                  disabled={forgotLoading}
-                  className="w-full py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 active:scale-95 text-black font-black text-xs shadow-md shadow-emerald-500/20 transition-all cursor-pointer flex items-center justify-center gap-1.5"
-                >
-                  {forgotLoading ? (
-                    <RefreshCw size={14} className="animate-spin" />
-                  ) : (
-                    <>
-                      <KeyRound size={14} />
-                      <span>Save Password & Login</span>
+                      <span>Send Recovery Email</span>
                     </>
                   )}
                 </button>

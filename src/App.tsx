@@ -10,12 +10,13 @@ import { ReportTab } from './components/tabs/ReportTab';
 import { ShareTab } from './components/tabs/ShareTab';
 import { MineTab } from './components/tabs/MineTab';
 import { AdminTab } from './components/tabs/AdminTab';
+import { PropertiesTab } from './components/tabs/PropertiesTab';
 import { LoginPage } from './components/auth/LoginPage';
 import { ModalRoot } from './components/modals/ModalRoot';
 import { CheckCircle2, AlertCircle, Info } from 'lucide-react';
 
 const MainScreen: React.FC = () => {
-  const { currentTab, isAuthenticated, toast, user } = useApp();
+  const { currentTab, setCurrentTab, isAuthenticated, toast, user } = useApp();
 
   const renderCurrentTab = () => {
     switch (currentTab) {
@@ -23,6 +24,8 @@ const MainScreen: React.FC = () => {
         return <HomeTab />;
       case 'plans':
         return <PlansTab />;
+      case 'properties':
+        return <PropertiesTab onOpenProfile={() => setCurrentTab('mine')} />;
       case 'bonus':
         return <BonusTab />;
       case 'report':

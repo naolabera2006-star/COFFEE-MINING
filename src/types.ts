@@ -7,6 +7,7 @@ export interface UserAccount {
   authProvider?: 'google' | 'phone' | 'email';
   isVerified?: boolean;
   userId: string;
+  supabaseUid?: string;
   inviteCode: string;
   invitationUrl: string;
   referredBy?: string; // Invite code from the sponsor/share link
@@ -157,6 +158,55 @@ export interface TeamMember {
   status: 'ACTIVE' | 'REGISTERED';
 }
 
-export type NavigationTab = 'home' | 'plans' | 'bonus' | 'report' | 'share' | 'mine' | 'admin';
+export type NavigationTab = 'home' | 'plans' | 'properties' | 'bonus' | 'report' | 'share' | 'mine' | 'admin';
 
 export type Language = 'en' | 'am' | 'om';
+
+export interface InquiryRecord {
+  id: string;
+  userId?: string;
+  fullName: string;
+  email: string;
+  phone?: string;
+  subject: string;
+  message: string;
+  status: 'pending' | 'in_progress' | 'resolved' | 'closed';
+  adminResponse?: string;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export type PropertyType =
+  | 'Coffee Farm'
+  | 'Processing Plant'
+  | 'Roastery Estate'
+  | 'Mining Facility'
+  | 'Commercial Warehouse';
+
+export interface PropertyItem {
+  id: string;
+  userId: string;                   // Supabase Auth user ID who listed the property
+  userEmail?: string;               // Lister email
+  title: string;
+  description: string;
+  propertyType: PropertyType | string;
+  price: number;                    // in ETB
+  expectedYield?: string;           // e.g. "18.5% Annual ROI" or "ETB 14,000/mo"
+  location: string;                 // e.g. "Yirgacheffe, Gedeo Zone"
+  imageUrl: string;
+  features: string[];
+  contactPhone?: string;
+  contactEmail?: string;
+  status: 'active' | 'pending' | 'sold';
+  likesCount: number;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface PropertyLikeRecord {
+  id: string;
+  propertyId: string;
+  userId: string;
+  userEmail?: string;
+  createdAt: string;
+}

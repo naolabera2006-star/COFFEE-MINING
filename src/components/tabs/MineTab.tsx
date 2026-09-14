@@ -1,5 +1,6 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
+import { UserProfilePage } from '../profile/UserProfilePage';
 import {
   ChevronRight,
   Copy,
@@ -18,7 +19,10 @@ import {
   Sparkles,
   TrendingUp,
   Coins,
-  CheckCircle2
+  CheckCircle2,
+  Building2,
+  Heart,
+  Plus
 } from 'lucide-react';
 
 export const MineTab: React.FC = () => {
@@ -31,8 +35,18 @@ export const MineTab: React.FC = () => {
     logout,
     transactions,
     plans,
+    properties,
+    likedPropertyIds,
     t
   } = useApp();
+
+  const [activeViewMode, setActiveViewMode] = useState<'profile' | 'wallet'>('profile');
+
+  const userIdentifier = user.supabaseUid || user.userId || user.email || '';
+  const userLikedCount = likedPropertyIds.length;
+  const userListedCount = properties.filter(
+    (p) => (p.userId && p.userId === userIdentifier) || (user.email && p.userEmail === user.email)
+  ).length;
 
   const userWithdrawals = transactions.filter((t) => t.type === 'withdraw');
   const pendingWithdrawalsCount = transactions.filter(
@@ -123,11 +137,51 @@ export const MineTab: React.FC = () => {
 
   return (
     <div className="flex-1 px-4 py-3 space-y-4 pb-14 select-none">
-      {/* 3. CORE FINANCIAL ASSETS & QUICK ACTIONS CARD */}
-      <div
-        id="card-mine-wallet-assets"
-        className="bg-gradient-to-b from-[#0e2a1e] to-[#0a2318] p-4 rounded-3xl border border-[#1b4e36] shadow-xl space-y-4"
-      >
+      {/* TOP VIEW SWITCHER: User Profile (Properties Liked & Listed) vs Financial Wallet */}
+      <div className="flex items-center gap-1.5 p-1 bg-zinc-950 border border-zinc-800/90 rounded-2xl shadow-inner">
+        <button
+          id="btn-mine-toggle-profile"
+          type="button"
+          onClick={() => setActiveViewMode('profile')}
+          className={`flex-1 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+            activeViewMode === 'profile'
+              ? 'bg-emerald-500 text-black font-black shadow-md shadow-emerald-500/20'
+              : 'text-zinc-400 hover:text-white'
+          }`}
+        >
+          <Building2 size={14} className={activeViewMode === 'profile' ? 'text-black' : 'text-emerald-400'} />
+          <span>User Profile & Properties</span>
+          <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono font-black ${
+            activeViewMode === 'profile' ? 'bg-black/25 text-black' : 'bg-[#103324] text-emerald-300 border border-emerald-500/30'
+          }`}>
+            {userLikedCount} Liked · {userListedCount} Listed
+          </span>
+        </button>
+
+        <button
+          id="btn-mine-toggle-wallet"
+          type="button"
+          onClick={() => setActiveViewMode('wallet')}
+          className={`flex-1 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+            activeViewMode === 'wallet'
+              ? 'bg-emerald-500 text-black font-black shadow-md shadow-emerald-500/20'
+              : 'text-zinc-400 hover:text-white'
+          }`}
+        >
+          <Wallet size={14} className={activeViewMode === 'wallet' ? 'text-black' : 'text-emerald-400'} />
+          <span>Mining Wallet</span>
+        </button>
+      </div>
+
+      {activeViewMode === 'profile' ? (
+        <UserProfilePage onNavigateToProperties={() => setCurrentTab('properties')} />
+      ) : (
+        <>
+          {/* 3. CORE FINANCIAL ASSETS & QUICK ACTIONS CARD */}
+          <div
+            id="card-mine-wallet-assets"
+            className="bg-gradient-to-b from-[#0e2a1e] to-[#0a2318] p-4 rounded-3xl border border-[#1b4e36] shadow-xl space-y-4"
+          >
         {/* Total Assets Balance Display */}
         <div className="flex items-start justify-between">
           <div className="space-y-0.5">
@@ -543,6 +597,8 @@ export const MineTab: React.FC = () => {
           <span>Sign Out</span>
         </button>
       </div>
+        </>
+      )}
 
     </div>
   );

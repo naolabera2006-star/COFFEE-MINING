@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
-import { InvestmentPlan, TransactionRecord } from '../../types';
+import { InvestmentPlan, TransactionRecord, InquiryRecord } from '../../types';
 import {
   ShieldCheck,
   CheckCircle,
@@ -29,7 +29,11 @@ import {
   Tag,
   FileText,
   Download,
-  FileSpreadsheet
+  FileSpreadsheet,
+  HelpCircle,
+  MessageSquare,
+  Database,
+  Send
 } from 'lucide-react';
 import {
   exportRechargeRecordsFile,
@@ -39,6 +43,11 @@ import {
   downloadWordDocFile,
   printPDFReport
 } from '../../utils/exportUtils';
+import {
+  INQUIRIES_TABLE_SQL,
+  fetchInquiriesFromSupabase,
+  updateInquiryInSupabase
+} from '../../lib/supabase';
 
 const PRESET_IMAGES = [
   { label: 'Arabica Extractor', url: 'https://images.unsplash.com/photo-1514432324607-a09d9b4aefdd?w=400&auto=format&fit=crop&q=80' },
@@ -71,7 +80,84 @@ export const AdminTab: React.FC = () => {
   } = useApp();
 
   // Sub-tabs
-  const [adminSection, setAdminSection] = useState<'withdrawals' | 'deposits' | 'plans' | 'userManagement'>('deposits');
+  const [adminSection, setAdminSection] = useState<'withdrawals' | 'deposits' | 'plans' | 'userManagement' | 'inquiries'>('deposits');
+
+  // Inquiries State
+  const [inquiries, setInquiries] = useState<InquiryRecord[]>([]);
+  const [loadingInquiries, setLoadingInquiries] = useState(false);
+  const [inquiryFilter, setInquiryFilter] = useState<'ALL' | 'pending' | 'in_progress' | 'resolved'>('ALL');
+  const [inquirySearch, setInquirySearch] = useState('');
+  const [showSqlModal, setShowSqlModal] = useState(false);
+  const [copiedSql, setCopiedSql] = useState(false);
+  const [selectedInquiry, setSelectedInquiry] = useState<InquiryRecord | null>(null);
+  const [replyText, setReplyText] = useState('');
+  const [updatingInquiry, setUpdatingInquiry] = useState(false);
+
+  // Load inquiries from Supabase on mount or section switch
+  useEffect(() => {
+    loadInquiries();
+  }, []);
+
+  const loadInquiries = async () => {
+    setLoadingInquiries(true);
+    try {
+      const data = await fetchInquiriesFromSupabase();
+      setInquiries(data);
+    } catch {
+      // Graceful fallback
+    } finally {
+      setLoadingInquiries(false);
+    }
+  };
+
+  const handleCopySql = () => {
+    navigator.clipboard.writeText(INQUIRIES_TABLE_SQL);
+    setCopiedSql(true);
+    showToast('SQL script copied to clipboard! Paste and run in Supabase SQL Editor.', 'success');
+    setTimeout(() => setCopiedSql(false), 3000);
+  };
+
+  const handleUpdateInquiryStatus = async (id: string, status: 'pending' | 'in_progress' | 'resolved' | 'closed') => {
+    setUpdatingInquiry(true);
+    try {
+      const ok = await updateInquiryInSupabase(id, { status });
+      if (ok) {
+        showToast(`Inquiry status updated to ${status}`, 'success');
+        setInquiries(prev => prev.map(item => item.id === id ? { ...item, status } : item));
+        if (selectedInquiry?.id === id) {
+          setSelectedInquiry(prev => prev ? { ...prev, status } : null);
+        }
+      } else {
+        showToast('Failed to update status', 'error');
+      }
+    } finally {
+      setUpdatingInquiry(false);
+    }
+  };
+
+  const handleSendInquiryReply = async () => {
+    if (!selectedInquiry || !replyText.trim()) {
+      showToast('Please type a reply message', 'error');
+      return;
+    }
+    setUpdatingInquiry(true);
+    try {
+      const ok = await updateInquiryInSupabase(selectedInquiry.id, {
+        status: 'resolved',
+        adminResponse: replyText.trim()
+      });
+      if (ok) {
+        showToast('Reply saved and inquiry marked as Resolved!', 'success');
+        setInquiries(prev => prev.map(item => item.id === selectedInquiry.id ? { ...item, status: 'resolved', adminResponse: replyText.trim() } : item));
+        setSelectedInquiry(null);
+        setReplyText('');
+      } else {
+        showToast('Failed to save reply', 'error');
+      }
+    } finally {
+      setUpdatingInquiry(false);
+    }
+  };
 
   // Withdrawal filters
   const [withdrawStatusFilter, setWithdrawStatusFilter] = useState<'ALL' | 'PENDING' | 'SUCCESS' | 'FAILED'>('PENDING');
@@ -386,12 +472,16 @@ export const AdminTab: React.FC = () => {
               <ShieldCheck size={22} />
             </div>
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <h1 className="text-base sm:text-lg font-black text-white tracking-tight font-['Outfit']">
-                  Admin Control Console
+                  COFFEE MINING Admin
                 </h1>
                 <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 text-[10px] font-bold border border-emerald-500/30">
                   MASTER
+                </span>
+                <span className="px-2 py-0.5 rounded-full bg-emerald-950/80 text-emerald-300 text-[10px] font-mono font-bold border border-emerald-500/40 flex items-center gap-1.5 shadow-xs" title="Supabase Connected: etysytltrsoompnvaekt">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                  Supabase: etysytltrsoompnvaekt
                 </span>
               </div>
               <p className="text-[11px] text-zinc-400">
@@ -517,6 +607,29 @@ export const AdminTab: React.FC = () => {
           >
             <User size={14} />
             <span>User & Balance</span>
+          </button>
+
+          <button
+            id="tab-admin-inquiries"
+            onClick={() => {
+              setAdminSection('inquiries');
+              loadInquiries();
+            }}
+            className={`flex-1 min-w-[110px] py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+              adminSection === 'inquiries'
+                ? 'bg-amber-500 text-black font-extrabold shadow-sm'
+                : 'text-zinc-400 hover:text-white'
+            }`}
+          >
+            <HelpCircle size={14} />
+            <span>Inquiries</span>
+            {inquiries.filter(i => i.status === 'pending').length > 0 && (
+              <span className={`px-1.5 py-0.2 rounded-full text-[9px] font-black ${
+                adminSection === 'inquiries' ? 'bg-black text-amber-400' : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+              }`}>
+                {inquiries.filter(i => i.status === 'pending').length}
+              </span>
+            )}
           </button>
         </div>
       </div>
@@ -1396,6 +1509,361 @@ export const AdminTab: React.FC = () => {
               <p>• Minimum Withdrawal Threshold: <strong className="text-white font-mono">ETB 150.00</strong></p>
               <p>• System Payout Handling & Tax Fee: <strong className="text-white font-mono">5.0%</strong></p>
               <p>• Settlement Mode: <strong className="text-emerald-400">Admin Manual Verification & Disbursal</strong></p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* SECTION 5: INQUIRIES & SUPPORT TICKETS (SUPABASE DATABASE) */}
+      {/* ========================================================================= */}
+      {adminSection === 'inquiries' && (
+        <div className="space-y-4 animate-in fade-in duration-200">
+          {/* Top Inquiries Header */}
+          <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-4 sm:p-5 shadow-lg space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-2xl bg-amber-500/20 text-amber-400 border border-amber-500/30 flex items-center justify-center font-bold">
+                  <HelpCircle size={18} />
+                </div>
+                <div>
+                  <h3 className="text-sm sm:text-base font-extrabold text-white font-['Outfit']">
+                    Customer Inquiries & Form Submissions
+                  </h3>
+                  <div className="flex items-center gap-1.5 text-[11px] text-zinc-400">
+                    <Database size={12} className="text-emerald-400" />
+                    <span>Table: <code className="font-mono text-emerald-400">public.inquiries</code></span>
+                    <span>•</span>
+                    <span>Total: <strong className="text-white font-mono">{inquiries.length}</strong></span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  id="btn-admin-sql-schema-toggle"
+                  type="button"
+                  onClick={() => setShowSqlModal(!showSqlModal)}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition-all cursor-pointer flex items-center gap-1.5 ${
+                    showSqlModal
+                      ? 'bg-amber-500 text-black border-amber-500'
+                      : 'bg-zinc-950 text-amber-300 border-amber-500/40 hover:bg-amber-500/10'
+                  }`}
+                >
+                  <Database size={13} />
+                  <span>SQL Table Schema</span>
+                </button>
+
+                <button
+                  id="btn-admin-refresh-inquiries"
+                  type="button"
+                  onClick={loadInquiries}
+                  disabled={loadingInquiries}
+                  className="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-bold rounded-xl border border-zinc-700 flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                  title="Refresh from Supabase"
+                >
+                  <RefreshCw size={13} className={loadingInquiries ? 'animate-spin' : ''} />
+                  <span>Refresh</span>
+                </button>
+              </div>
+            </div>
+
+            {/* SQL Table Schema Card (Toggled or Copyable) */}
+            {showSqlModal && (
+              <div className="p-4 rounded-2xl bg-zinc-950 border border-amber-500/40 space-y-3 animate-in zoom-in-95">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-amber-300">
+                    <Database size={15} />
+                    <span>Supabase PostgreSQL Schema for Inquiries Form</span>
+                  </div>
+                  <button
+                    id="btn-copy-inquiries-sql"
+                    type="button"
+                    onClick={handleCopySql}
+                    className="px-3 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-black text-xs font-extrabold flex items-center gap-1 transition-colors cursor-pointer"
+                  >
+                    {copiedSql ? <Check size={13} /> : <Copy size={13} />}
+                    <span>{copiedSql ? 'Copied to Clipboard!' : 'Copy SQL Script'}</span>
+                  </button>
+                </div>
+
+                <p className="text-[11px] text-zinc-400 leading-relaxed">
+                  Run this SQL statement in your <strong className="text-white">Supabase SQL Editor</strong> (Project: <code className="text-emerald-400 font-mono">etysytltrsoompnvaekt</code>) to create the table with indexes and Row-Level Security:
+                </p>
+
+                <pre className="p-3 rounded-xl bg-zinc-900 border border-zinc-800 text-[10px] font-mono text-emerald-300 overflow-x-auto max-h-56 select-all">
+                  {INQUIRIES_TABLE_SQL}
+                </pre>
+              </div>
+            )}
+
+            {/* Search and Filters */}
+            <div className="space-y-2 pt-1">
+              <div className="relative">
+                <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
+                <input
+                  id="search-inquiries-input"
+                  type="text"
+                  value={inquirySearch}
+                  onChange={(e) => setInquirySearch(e.target.value)}
+                  placeholder="Search inquiries by name, email, phone, or question..."
+                  className="w-full pl-9 pr-3 py-2 bg-zinc-950 border border-zinc-800 rounded-xl text-xs font-semibold text-white placeholder:text-zinc-600 focus:outline-hidden focus:border-amber-500"
+                />
+              </div>
+
+              <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar">
+                {(['ALL', 'pending', 'in_progress', 'resolved'] as const).map((filter) => {
+                  const count = filter === 'ALL'
+                    ? inquiries.length
+                    : inquiries.filter(i => i.status === filter).length;
+                  return (
+                    <button
+                      key={filter}
+                      type="button"
+                      onClick={() => setInquiryFilter(filter)}
+                      className={`px-3 py-1 rounded-xl text-xs font-bold border transition-all cursor-pointer whitespace-nowrap flex items-center gap-1.5 ${
+                        inquiryFilter === filter
+                          ? 'bg-amber-500 text-black border-amber-500'
+                          : 'bg-zinc-950 text-zinc-400 border-zinc-800 hover:border-zinc-700'
+                      }`}
+                    >
+                      <span className="capitalize">{filter.replace('_', ' ')}</span>
+                      <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono font-black ${
+                        inquiryFilter === filter ? 'bg-black/20 text-black' : 'bg-zinc-800 text-zinc-300'
+                      }`}>
+                        {count}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
+          {/* Inquiries List */}
+          <div className="space-y-3">
+            {loadingInquiries ? (
+              <div className="p-8 text-center text-zinc-500 space-y-2">
+                <RefreshCw size={24} className="animate-spin mx-auto text-amber-400" />
+                <p className="text-xs">Fetching inquiries from Supabase database...</p>
+              </div>
+            ) : inquiries.length === 0 ? (
+              <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-8 text-center space-y-2">
+                <div className="w-12 h-12 rounded-full bg-zinc-800 text-zinc-500 flex items-center justify-center mx-auto">
+                  <MessageSquare size={20} />
+                </div>
+                <h4 className="text-sm font-bold text-white">No Inquiries Submitted Yet</h4>
+                <p className="text-xs text-zinc-400 max-w-sm mx-auto">
+                  When users submit support requests from the Customer Support modal, their tickets will be stored in the Supabase database and displayed here.
+                </p>
+              </div>
+            ) : (
+              inquiries
+                .filter(item => {
+                  if (inquiryFilter !== 'ALL' && item.status !== inquiryFilter) return false;
+                  if (inquirySearch) {
+                    const q = inquirySearch.toLowerCase();
+                    return (
+                      item.fullName.toLowerCase().includes(q) ||
+                      item.email.toLowerCase().includes(q) ||
+                      (item.phone && item.phone.toLowerCase().includes(q)) ||
+                      item.subject.toLowerCase().includes(q) ||
+                      item.message.toLowerCase().includes(q)
+                    );
+                  }
+                  return true;
+                })
+                .map((inq) => (
+                  <div
+                    key={inq.id}
+                    className="bg-zinc-900 border border-zinc-800 rounded-3xl p-4 sm:p-5 space-y-3 shadow-md transition-all hover:border-zinc-700"
+                  >
+                    {/* Header Row: Submitter info and Status */}
+                    <div className="flex flex-wrap items-start justify-between gap-2 pb-2.5 border-b border-zinc-800">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <h4 className="text-sm font-black text-white font-['Outfit']">
+                            {inq.fullName}
+                          </h4>
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${
+                              inq.status === 'resolved'
+                                ? 'bg-emerald-950 text-emerald-300 border border-emerald-500/30'
+                                : inq.status === 'in_progress'
+                                ? 'bg-sky-950 text-sky-300 border border-sky-500/30'
+                                : 'bg-amber-950 text-amber-300 border border-amber-500/30'
+                            }`}
+                          >
+                            {inq.status.replace('_', ' ')}
+                          </span>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-400 mt-1">
+                          <span className="text-zinc-300 font-semibold">{inq.email}</span>
+                          {inq.phone && (
+                            <>
+                              <span>•</span>
+                              <span className="font-mono text-zinc-400">{inq.phone}</span>
+                            </>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="text-right">
+                        <span className="text-[10px] text-zinc-500 block font-mono">
+                          {new Date(inq.createdAt).toLocaleString('en-US', {
+                            month: 'short',
+                            day: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit'
+                          })}
+                        </span>
+                        <span className="text-[10px] font-mono text-zinc-600 block">
+                          ID: {inq.id.slice(0, 8)}...
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Subject Pill */}
+                    <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-zinc-950 border border-zinc-800 text-[11px] font-bold text-amber-300">
+                      <Tag size={12} className="text-amber-400" />
+                      <span>{inq.subject}</span>
+                    </div>
+
+                    {/* Inquiry Message Text */}
+                    <div className="p-3 bg-zinc-950 rounded-2xl border border-zinc-800/80 text-xs text-zinc-200 leading-relaxed whitespace-pre-wrap">
+                      {inq.message}
+                    </div>
+
+                    {/* Admin Response if present */}
+                    {inq.adminResponse && (
+                      <div className="p-3 bg-emerald-950/40 rounded-2xl border border-emerald-500/30 space-y-1 text-xs text-emerald-200">
+                        <div className="flex items-center gap-1 text-[11px] font-bold text-emerald-400">
+                          <ShieldCheck size={13} />
+                          <span>Admin Response:</span>
+                        </div>
+                        <p className="leading-relaxed whitespace-pre-wrap text-zinc-300">
+                          {inq.adminResponse}
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Action Buttons */}
+                    <div className="flex flex-wrap items-center justify-end gap-2 pt-1 border-t border-zinc-800/60">
+                      {inq.status !== 'in_progress' && inq.status !== 'resolved' && (
+                        <button
+                          type="button"
+                          disabled={updatingInquiry}
+                          onClick={() => handleUpdateInquiryStatus(inq.id, 'in_progress')}
+                          className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-sky-300 text-xs font-bold transition-colors cursor-pointer disabled:opacity-50"
+                        >
+                          Mark In Progress
+                        </button>
+                      )}
+
+                      {inq.status !== 'resolved' && (
+                        <button
+                          type="button"
+                          disabled={updatingInquiry}
+                          onClick={() => handleUpdateInquiryStatus(inq.id, 'resolved')}
+                          className="px-3 py-1.5 rounded-xl bg-emerald-950 hover:bg-emerald-900 border border-emerald-500/40 text-emerald-300 text-xs font-bold transition-colors cursor-pointer disabled:opacity-50"
+                        >
+                          Mark Resolved
+                        </button>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedInquiry(inq);
+                          setReplyText(inq.adminResponse || '');
+                        }}
+                        className="px-3 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-black text-xs font-black transition-colors cursor-pointer flex items-center gap-1"
+                      >
+                        <Send size={12} />
+                        <span>{inq.adminResponse ? 'Edit Reply' : 'Reply to User'}</span>
+                      </button>
+                    </div>
+                  </div>
+                ))
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: ADMIN INQUIRY REPLY */}
+      {selectedInquiry && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-xs p-4 animate-in fade-in duration-200">
+          <div className="w-full max-w-md bg-zinc-900 border border-zinc-800 rounded-3xl p-5 shadow-2xl space-y-4 text-white">
+            <div className="flex items-center justify-between pb-2 border-b border-zinc-800">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-amber-500/20 text-amber-400 border border-amber-500/30 flex items-center justify-center font-bold">
+                  <Send size={16} />
+                </div>
+                <div>
+                  <h3 className="text-sm font-black text-white font-['Outfit']">
+                    Reply to {selectedInquiry.fullName}
+                  </h3>
+                  <span className="text-[11px] text-zinc-400">
+                    {selectedInquiry.email}
+                  </span>
+                </div>
+              </div>
+              <button
+                onClick={() => setSelectedInquiry(null)}
+                className="w-7 h-7 rounded-full bg-zinc-800 text-zinc-400 hover:text-white flex items-center justify-center cursor-pointer text-xs"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Inquiry Context summary */}
+            <div className="p-3 bg-zinc-950 rounded-2xl border border-zinc-800 text-xs space-y-1">
+              <span className="text-[10px] text-zinc-400 font-bold block uppercase tracking-wider">
+                User Question ({selectedInquiry.subject}):
+              </span>
+              <p className="text-zinc-300 italic line-clamp-3">
+                "{selectedInquiry.message}"
+              </p>
+            </div>
+
+            {/* Response Input */}
+            <div className="space-y-1.5">
+              <label htmlFor="admin-reply-textarea" className="text-xs font-bold text-zinc-300 block">
+                Official Support Reply / Resolution:
+              </label>
+              <textarea
+                id="admin-reply-textarea"
+                rows={4}
+                value={replyText}
+                onChange={(e) => setReplyText(e.target.value)}
+                placeholder="Type your response to the user. This will be stored in Supabase and marked as resolved..."
+                className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-xl text-xs font-semibold text-white focus:outline-hidden focus:border-amber-500 resize-none"
+              />
+            </div>
+
+            <div className="flex gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setSelectedInquiry(null)}
+                className="flex-1 py-2.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-bold text-xs rounded-xl cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={updatingInquiry || !replyText.trim()}
+                onClick={handleSendInquiryReply}
+                className="flex-2 py-2.5 bg-emerald-500 hover:bg-emerald-400 active:scale-98 text-black font-black text-xs rounded-xl shadow-lg shadow-emerald-500/20 cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-50"
+              >
+                {updatingInquiry ? (
+                  <RefreshCw size={14} className="animate-spin" />
+                ) : (
+                  <>
+                    <CheckCircle size={14} />
+                    <span>Save Reply & Resolve</span>
+                  </>
+                )}
+              </button>
             </div>
           </div>
         </div>

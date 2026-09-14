@@ -8,9 +8,20 @@ import {
   TeamMember,
   NavigationTab,
   BankDetails,
-  Language
+  Language,
+  PropertyItem
 } from '../types';
 import { translations } from '../i18n/translations';
+import {
+  supabase,
+  fetchPropertiesFromSupabase,
+  createPropertyInSupabase,
+  deletePropertyFromSupabase,
+  fetchUserLikedPropertyIds,
+  togglePropertyLikeInSupabase,
+  getLocalProperties,
+  getLocalUserLikes
+} from '../lib/supabase';
 import {
   INITIAL_PLANS,
   INITIAL_USER,
@@ -42,8 +53,9 @@ interface AppContextType {
   // Auth actions
   loginWithGoogle: (email: string, name?: string, avatar?: string) => Promise<{ success: boolean; message: string }>;
   loginWithCredentials: (identifier: string, pass: string, role?: 'user' | 'admin') => Promise<{ success: boolean; message: string }>;
-  registerUser: (identifier: string, pass: string, inviteCode?: string, name?: string) => Promise<{ success: boolean; message: string }>;
-  logout: () => void;
+  registerUser: (identifier: string, pass: string, inviteCode?: string, name?: string) => Promise<{ success: boolean; message: string; requiresEmailConfirmation?: boolean }>;
+  resetPasswordForEmail: (email: string) => Promise<{ success: boolean; message: string }>;
+  logout: () => Promise<void> | void;
   setUserRole: (role: 'user' | 'admin') => void;
   switchDemoAccount: (role: 'user' | 'admin') => void;
   
@@ -114,6 +126,15 @@ interface AppContextType {
   
   // Derived state
   pendingHarvestTotal: number;
+
+  // Properties & Liked Items (Supabase-backed)
+  properties: PropertyItem[];
+  likedPropertyIds: string[];
+  loadingProperties: boolean;
+  loadProperties: () => Promise<void>;
+  toggleLikeProperty: (propertyId: string) => Promise<{ liked: boolean; newCount: number }>;
+  listProperty: (propertyData: Omit<PropertyItem, 'id' | 'createdAt' | 'likesCount' | 'userId'>) => Promise<{ success: boolean; message: string }>;
+  deleteProperty: (propertyId: string) => Promise<{ success: boolean; message: string }>;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -127,10 +148,10 @@ const STORAGE_KEY_AUTH = 'coffee_app_is_authenticated_v1';
 const STORAGE_KEY_PLANS = 'coffee_app_plans_v1';
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // Authentication state (default true if user had session, or true on first load with demo account)
+  // Authentication state (defaults to false so users land on Login/Signup screen)
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
     const saved = localStorage.getItem(STORAGE_KEY_AUTH);
-    return saved !== null ? JSON.parse(saved) : true;
+    return saved !== null ? JSON.parse(saved) : false;
   });
 
   // Dynamic Investment Plans state
@@ -570,6 +591,170 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     localStorage.setItem(STORAGE_KEY_AUTH, JSON.stringify(isAuthenticated));
   }, [isAuthenticated]);
 
+  // Supabase Auth listener & session restore on startup
+  useEffect(() => {
+    // Check initial active session from Supabase
+    supabase.auth.getSession().then(({ data: { session }, error }) => {
+      if (error) {
+        console.warn('Supabase getSession notice:', error.message);
+        return;
+      }
+      if (session?.user) {
+        setIsAuthenticated(true);
+        const email = session.user.email || '';
+        const meta = session.user.user_metadata || {};
+        const name = meta.display_name || meta.name || email.split('@')[0].replace(/[._]/g, ' ');
+        const isAdmin = email.toLowerCase().includes('admin') || meta.role === 'admin';
+        setUser((prev) => ({
+          ...prev,
+          email: email || prev.email,
+          displayName: prev.displayName && prev.displayName !== 'Active Investor' ? prev.displayName : name,
+          userId: session.user.id.slice(0, 8),
+          supabaseUid: session.user.id,
+          role: isAdmin ? 'admin' : prev.role,
+          authProvider: 'email',
+          isVerified: session.user.email_confirmed_at ? true : prev.isVerified,
+        }));
+      }
+    });
+
+    // Listen for auth changes (sign in, sign out, user updated)
+    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
+      if ((event === 'SIGNED_IN' || event === 'USER_UPDATED') && session?.user) {
+        setIsAuthenticated(true);
+        const email = session.user.email || '';
+        const meta = session.user.user_metadata || {};
+        const name = meta.display_name || meta.name || email.split('@')[0].replace(/[._]/g, ' ');
+        const isAdmin = email.toLowerCase().includes('admin') || meta.role === 'admin';
+        setUser((prev) => ({
+          ...prev,
+          email,
+          displayName: name,
+          role: isAdmin ? 'admin' : prev.role,
+          userId: session.user.id.slice(0, 8),
+          supabaseUid: session.user.id,
+          authProvider: 'email',
+          isVerified: true,
+        }));
+      } else if (event === 'SIGNED_OUT') {
+        setIsAuthenticated(false);
+      }
+    });
+
+    return () => {
+      authListener.subscription.unsubscribe();
+    };
+  }, []);
+
+  /* ========================================================================= */
+  /* PROPERTIES & USER LIKES (SUPABASE DATABASE)                              */
+  /* ========================================================================= */
+  const [properties, setProperties] = useState<PropertyItem[]>(() => getLocalProperties());
+  const [likedPropertyIds, setLikedPropertyIds] = useState<string[]>([]);
+  const [loadingProperties, setLoadingProperties] = useState<boolean>(false);
+
+  const loadProperties = async () => {
+    setLoadingProperties(true);
+    try {
+      const fetched = await fetchPropertiesFromSupabase();
+      setProperties(fetched);
+    } catch {
+      // Fallback already returned by helper
+    } finally {
+      setLoadingProperties(false);
+    }
+  };
+
+  // Load properties on initial mount
+  useEffect(() => {
+    loadProperties();
+  }, []);
+
+  // Sync user's liked properties whenever user or authentication state changes
+  useEffect(() => {
+    const userIdentifier = user.supabaseUid || user.userId || user.email;
+    if (isAuthenticated && userIdentifier) {
+      fetchUserLikedPropertyIds(userIdentifier).then(ids => {
+        setLikedPropertyIds(ids);
+      });
+    } else {
+      setLikedPropertyIds([]);
+    }
+  }, [isAuthenticated, user.supabaseUid, user.userId, user.email]);
+
+  const toggleLikeProperty = async (propertyId: string): Promise<{ liked: boolean; newCount: number }> => {
+    if (!isAuthenticated) {
+      showToast('Please sign in to like and save properties', 'error');
+      openModal('login');
+      return { liked: false, newCount: 0 };
+    }
+
+    const userIdentifier = user.supabaseUid || user.userId || user.email || 'user';
+    try {
+      const result = await togglePropertyLikeInSupabase(propertyId, userIdentifier, user.email);
+      if (result.liked) {
+        setLikedPropertyIds(prev => Array.from(new Set([...prev, propertyId])));
+        showToast('Property saved to your profile!', 'success');
+      } else {
+        setLikedPropertyIds(prev => prev.filter(id => id !== propertyId));
+        showToast('Property removed from saved items', 'info');
+      }
+
+      setProperties(prev => prev.map(p => p.id === propertyId ? { ...p, likesCount: result.newCount } : p));
+      return result;
+    } catch (err: any) {
+      showToast(err.message || 'Error updating like', 'error');
+      return { liked: false, newCount: 0 };
+    }
+  };
+
+  const listProperty = async (
+    propertyData: Omit<PropertyItem, 'id' | 'createdAt' | 'likesCount' | 'userId'>
+  ): Promise<{ success: boolean; message: string }> => {
+    if (!isAuthenticated) {
+      showToast('Please sign in to list properties', 'error');
+      openModal('login');
+      return { success: false, message: 'Authentication required' };
+    }
+
+    const userIdentifier = user.supabaseUid || user.userId || user.email || 'user';
+    try {
+      const res = await createPropertyInSupabase({
+        ...propertyData,
+        userId: userIdentifier,
+        userEmail: user.email,
+        contactEmail: propertyData.contactEmail || user.email,
+        contactPhone: propertyData.contactPhone || user.phone
+      });
+
+      if (res.success && res.data) {
+        setProperties(prev => [res.data!, ...prev.filter(p => p.id !== res.data!.id)]);
+        showToast(res.message || 'Property successfully listed in Supabase!', 'success');
+        return { success: true, message: res.message };
+      }
+      return { success: false, message: res.message };
+    } catch (err: any) {
+      showToast('Failed to list property', 'error');
+      return { success: false, message: err.message || 'Failed to list property' };
+    }
+  };
+
+  const deleteProperty = async (propertyId: string): Promise<{ success: boolean; message: string }> => {
+    const userIdentifier = user.supabaseUid || user.userId || user.email || 'user';
+    try {
+      const ok = await deletePropertyFromSupabase(propertyId, userIdentifier);
+      if (ok) {
+        setProperties(prev => prev.filter(p => p.id !== propertyId));
+        setLikedPropertyIds(prev => prev.filter(id => id !== propertyId));
+        showToast('Property listing removed', 'info');
+        return { success: true, message: 'Property deleted' };
+      }
+      return { success: false, message: 'Failed to delete property' };
+    } catch {
+      return { success: false, message: 'Error deleting property' };
+    }
+  };
+
   // Suggestion 2 & Requests: User Balance & Today's Income Sync according to User Rules:
   // 1. Current Balance = sum of Recharged or invested + Bonus + Daily claimed for User role
   // 2. Today's Income = Total single daily claimed + daily bonus + Redeem code bonus for User role
@@ -691,44 +876,96 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
   };
 
-  // Auth: Standard Credentials Login
+  // Auth: Standard Credentials Login via Supabase Auth
   const loginWithCredentials = async (
     identifier: string,
     pass: string,
     role: 'user' | 'admin' = 'user'
   ): Promise<{ success: boolean; message: string }> => {
-    if (!identifier || !pass) {
-      return { success: false, message: 'Please enter both login identifier and password' };
+    const cleanIdentifier = identifier.trim();
+    if (!cleanIdentifier || !pass) {
+      return { success: false, message: 'Please enter both login email and password' };
     }
     if (pass.length < 4) {
       return { success: false, message: 'Password must be at least 4 characters' };
     }
 
-    return new Promise((resolve) => {
-      setTimeout(() => {
-        const isEmail = identifier.includes('@');
-        const formattedName = isEmail
-          ? identifier
-              .split('@')[0]
-              .replace(/[._]/g, ' ')
-              .replace(/\b\w/g, (c) => c.toUpperCase())
-          : `Member ${identifier.slice(-4)}`;
+    // Quick Demo Admin & Investor Fast Pass for immediate testing
+    if (cleanIdentifier === 'admin@coffee-invest.app' && pass === 'admin123') {
+      setUser((prev) => ({
+        ...prev,
+        role: 'admin',
+        email: cleanIdentifier,
+        displayName: 'Platform Admin',
+        authProvider: 'email',
+        isVerified: true,
+      }));
+      setIsAuthenticated(true);
+      showToast('Signed in as Platform Administrator (Demo Mode)', 'success');
+      return { success: true, message: 'Login successful' };
+    }
+    if (cleanIdentifier === 'demo@coffee-invest.app' && pass === 'demo123') {
+      setUser((prev) => ({
+        ...prev,
+        role: 'user',
+        email: cleanIdentifier,
+        displayName: 'Demo Investor',
+        authProvider: 'email',
+        isVerified: true,
+      }));
+      setIsAuthenticated(true);
+      showToast('Signed in as Demo Investor', 'success');
+      return { success: true, message: 'Login successful' };
+    }
+
+    // Direct Supabase Email Authentication
+    try {
+      const isEmail = cleanIdentifier.includes('@');
+      const emailToUse = isEmail ? cleanIdentifier : `${cleanIdentifier.replace(/\+/g, '').replace(/\s+/g, '')}@coffeemining.app`;
+
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: emailToUse,
+        password: pass,
+      });
+
+      if (error) {
+        console.warn('Supabase sign-in error:', error);
+        return {
+          success: false,
+          message: error.message || 'Invalid email or password. Please try again.'
+        };
+      }
+
+      if (data.session && data.user) {
+        const userMeta = data.user.user_metadata || {};
+        const isUserAdmin = userMeta.role === 'admin' || emailToUse.toLowerCase().includes('admin') || role === 'admin';
+        const formattedName = userMeta.display_name || emailToUse.split('@')[0].replace(/[._]/g, ' ');
 
         setUser((prev) => ({
           ...prev,
-          role: role,
-          phone: isEmail ? prev.phone : identifier,
-          email: isEmail ? identifier : prev.email,
-          displayName: role === 'admin' ? `Admin (${formattedName})` : formattedName,
-          authProvider: isEmail ? 'email' : 'phone',
+          role: isUserAdmin ? 'admin' : 'user',
+          email: data.user.email || emailToUse,
+          displayName: formattedName,
+          authProvider: 'email',
+          userId: data.user.id.slice(0, 8),
           isVerified: true,
         }));
 
         setIsAuthenticated(true);
-        showToast(`Signed in successfully as ${role === 'admin' ? 'Administrator' : 'Investor'} (${identifier})`, 'success');
-        resolve({ success: true, message: 'Login successful' });
-      }, 600);
-    });
+        confetti({
+          particleCount: 50,
+          spread: 60,
+          origin: { y: 0.6 },
+        });
+        showToast(`Welcome back, ${formattedName}! Signed in successfully.`, 'success');
+        return { success: true, message: 'Login successful' };
+      }
+
+      return { success: false, message: 'Unable to retrieve session from Supabase.' };
+    } catch (err: any) {
+      console.error('Supabase signIn catch error:', err);
+      return { success: false, message: err?.message || 'Authentication failed. Please check network connection.' };
+    }
   };
 
   // Auth: Set User Role
@@ -760,90 +997,143 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  // Auth: Registration
+  // Auth: Registration with Supabase Email Auth
   const registerUser = async (
     identifier: string,
     pass: string,
-    inviteCode: string = '318g3wd752',
+    inviteCode: string = 'CMARJT5',
     name?: string
-  ): Promise<{ success: boolean; message: string }> => {
-    if (!identifier || !pass) {
+  ): Promise<{ success: boolean; message: string; requiresEmailConfirmation?: boolean }> => {
+    const cleanIdentifier = identifier.trim();
+    if (!cleanIdentifier || !pass) {
       return { success: false, message: 'Please complete all required fields' };
     }
+    if (pass.length < 6) {
+      return { success: false, message: 'Password must be at least 6 characters (Supabase requirement)' };
+    }
 
-    return new Promise((resolve) => {
-      setTimeout(() => {
-        const isEmail = identifier.includes('@');
-        const newUserId = 'f' + Math.floor(1000 + Math.random() * 9000);
-        const newInviteCode = Math.random().toString(36).substring(2, 10);
-        const formattedName =
-          name ||
-          (isEmail
-            ? identifier
-                .split('@')[0]
-                .replace(/[._]/g, ' ')
-                .replace(/\b\w/g, (c) => c.toUpperCase())
-            : `Member ${identifier.slice(-4)}`);
+    const isEmail = cleanIdentifier.includes('@');
+    const emailToUse = isEmail ? cleanIdentifier : `${cleanIdentifier.replace(/\+/g, '').replace(/\s+/g, '')}@coffeemining.app`;
+    const formattedName = name?.trim() || (isEmail ? cleanIdentifier.split('@')[0].replace(/[._]/g, ' ') : `Investor ${cleanIdentifier.slice(-4)}`);
+    const newInviteCode = Math.random().toString(36).substring(2, 10).toUpperCase();
+    const starterCredit = 100.0;
 
-        // Free Coffee Starter Credit on registration: ETB 100
-        const starterCredit = 100.0;
+    try {
+      const { data, error } = await supabase.auth.signUp({
+        email: emailToUse,
+        password: pass,
+        options: {
+          data: {
+            display_name: formattedName,
+            invite_code: newInviteCode,
+            referred_by: inviteCode || 'CMARJT5',
+            role: 'user',
+          },
+        },
+      });
 
-        const newUser: UserAccount = {
-          ...INITIAL_USER,
-          phone: isEmail ? '+251 98' + Math.floor(10000000 + Math.random() * 89999999) : identifier,
-          email: isEmail ? identifier : undefined,
-          displayName: formattedName,
-          userId: newUserId,
-          inviteCode: newInviteCode,
-          invitationUrl: `https://coffee-invest.app/member/invitation/login&register?code=${newInviteCode}`,
-          referredBy: inviteCode || undefined,
-          authProvider: isEmail ? 'email' : 'phone',
-          isVerified: true,
-          balance: starterCredit, // Free Coffee Starter Credit on registration!
-          totalReward: starterCredit,
+      if (error) {
+        console.warn('Supabase signUp error:', error);
+        return {
+          success: false,
+          message: error.message || 'Registration failed. Please check your credentials.'
         };
+      }
 
-        const welcomeTx: TransactionRecord = {
-          id: 'tx-' + Date.now(),
-          type: 'bonus',
-          title: 'Free Coffee Starter Credit',
-          amount: starterCredit,
-          date: new Date().toLocaleDateString('en-GB', {
-            day: '2-digit',
-            month: 'short',
-            year: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit',
-          }),
-          timestamp: Date.now(),
-          status: 'SUCCESS',
-          orderId: 'SYS' + Math.floor(100000 + Math.random() * 900000),
-          details: inviteCode 
-            ? `Account activated via invite code [${inviteCode}] with ETB ${starterCredit.toFixed(2)} Free Coffee Starter Credit`
-            : `Account activated with ETB ${starterCredit.toFixed(2)} Free Coffee Starter Credit on registration`,
-        };
+      const hasSession = !!data.session;
+      const newUser: UserAccount = {
+        ...INITIAL_USER,
+        userId: data.user?.id ? data.user.id.slice(0, 8) : 'f' + Math.floor(1000 + Math.random() * 9000),
+        email: emailToUse,
+        phone: isEmail ? '+251 98' + Math.floor(10000000 + Math.random() * 89999999) : cleanIdentifier,
+        displayName: formattedName,
+        inviteCode: newInviteCode,
+        invitationUrl: `https://coffeemining.app/member/invitation/login&register?code=${newInviteCode}`,
+        referredBy: inviteCode || undefined,
+        authProvider: 'email',
+        isVerified: hasSession,
+        balance: starterCredit,
+        totalReward: starterCredit,
+      };
 
-        setUser(newUser);
-        setTransactions([welcomeTx]);
-        setActiveOrders([]);
-        setTeamMembers([]);
+      const welcomeTx: TransactionRecord = {
+        id: 'tx-' + Date.now(),
+        type: 'bonus',
+        title: 'Free Coffee Starter Credit',
+        amount: starterCredit,
+        date: new Date().toLocaleDateString('en-GB', {
+          day: '2-digit',
+          month: 'short',
+          year: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+        }),
+        timestamp: Date.now(),
+        status: 'SUCCESS',
+        orderId: 'SYS' + Math.floor(100000 + Math.random() * 900000),
+        details: inviteCode 
+          ? `Account registered in Supabase & activated via invite [${inviteCode}] with ETB ${starterCredit.toFixed(2)} Free Starter Credit`
+          : `Account registered in Supabase with ETB ${starterCredit.toFixed(2)} Free Starter Credit`,
+      };
+
+      setUser(newUser);
+      setTransactions([welcomeTx]);
+      setActiveOrders([]);
+      setTeamMembers([]);
+
+      if (hasSession) {
         setIsAuthenticated(true);
-
         confetti({
           particleCount: 70,
           spread: 60,
           origin: { y: 0.6 },
         });
+        showToast(`Account registered in Supabase! ETB 100.00 Free Coffee Starter Credit added.`, 'success');
+        return { success: true, message: 'Registration successful!' };
+      } else {
+        // Confirmation email sent by Supabase
+        showToast(`Account created! Verification email sent to ${emailToUse}.`, 'info');
+        return {
+          success: true,
+          requiresEmailConfirmation: true,
+          message: `Account created! Supabase has sent a verification email to ${emailToUse}. Please check your inbox or spam folder to confirm your email, then Sign In.`,
+        };
+      }
+    } catch (err: any) {
+      console.error('Supabase signUp catch error:', err);
+      return { success: false, message: err?.message || 'Failed to sign up with Supabase' };
+    }
+  };
 
-        showToast('Account registered! ETB 100.00 Free Coffee Starter Credit received.', 'success');
-        resolve({ success: true, message: 'Registration successful' });
-      }, 700);
-    });
+  // Auth: Password Reset via Supabase
+  const resetPasswordForEmail = async (email: string): Promise<{ success: boolean; message: string }> => {
+    try {
+      const cleanEmail = email.trim();
+      if (!cleanEmail || !cleanEmail.includes('@')) {
+        return { success: false, message: 'Please enter a valid email address' };
+      }
+      const { error } = await supabase.auth.resetPasswordForEmail(cleanEmail, {
+        redirectTo: window.location.origin,
+      });
+      if (error) {
+        return { success: false, message: error.message };
+      }
+      showToast(`Password reset email sent to ${cleanEmail} via Supabase!`, 'success');
+      return { success: true, message: `Password reset instructions sent to ${cleanEmail}` };
+    } catch (err: any) {
+      return { success: false, message: err?.message || 'Failed to send password reset request' };
+    }
   };
 
   // Auth: Logout
-  const logout = () => {
+  const logout = async () => {
+    try {
+      await supabase.auth.signOut();
+    } catch (err) {
+      console.warn('Supabase signOut notice:', err);
+    }
     setIsAuthenticated(false);
+    localStorage.setItem(STORAGE_KEY_AUTH, JSON.stringify(false));
     showToast('You have been signed out.', 'info');
   };
 
@@ -1977,7 +2267,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         loginWithGoogle,
         loginWithCredentials,
         registerUser,
+        resetPasswordForEmail,
         logout,
+        setUserRole,
+        switchDemoAccount,
         activeModal,
         selectedPlan,
         isAndroidFrame,
@@ -2015,7 +2308,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         saveBankDetails,
         simulateTeamMemberJoin,
         resetAllData,
-        pendingHarvestTotal
+        pendingHarvestTotal,
+        properties,
+        likedPropertyIds,
+        loadingProperties,
+        loadProperties,
+        toggleLikeProperty,
+        listProperty,
+        deleteProperty
       }}
     >
       {children}
